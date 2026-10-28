@@ -1,0 +1,7 @@
+{
+  "name": "Briefly AI",
+  "description": "Zero-friction lecture transcription and AI study aid generator. Record lectures, generate summaries, flashcards, and quizzes instantly.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

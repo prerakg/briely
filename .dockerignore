@@ -1,0 +1,13 @@
+.env
+.env.*
+node_modules
+.venv
+dist
+.git
+*.db
+*.db-*
+artifacts
+test-results
+playwright-report
+__pycache__
+.pytest_cache

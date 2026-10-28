@@ -1,0 +1,3 @@
+Use .env.example for the complete server-only configuration.
+Do not expose GEMINI_API_KEY, GROQ_API_KEY or RAPID_API_KEY through Vite.
+Run both the FastAPI backend and Vite frontend; see docs/backend-setup.md.
