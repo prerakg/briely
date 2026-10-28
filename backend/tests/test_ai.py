@@ -402,3 +402,106 @@ async def test_provider_json_generation_rejection_enters_format_repair_path():
     assert "failed_generation" not in failure and "unfinished" not in json.dumps(
         failure
     )
+
+
+def test_compound_retry_durations_are_not_truncated():
+    response = httpx.Response(
+        429, json={"error": {"message": "Please try again in 1m12.5s."}}
+    )
+    assert Gateway.response_retry_delay(response) == 72.75
+    assert Gateway.duration_seconds("2m3.25s") == 123.25
+
+
+@pytest.mark.asyncio
+async def test_success_headers_pace_following_requests_without_calling_fallback(
+    monkeypatch,
+):
+    waits = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr("backend.app.providers.asyncio.sleep", sleep)
+    calls = []
+
+    def handle(req):
+        calls.append(req)
+        return httpx.Response(
+            200,
+            headers={
+                "x-ratelimit-remaining-tokens": "10",
+                "x-ratelimit-reset-tokens": "5s",
+            },
+            json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]},
+        )
+
+    ai = Gateway(
+        Settings(_env_file=None, groq_api_key="test"), httpx.MockTransport(handle)
+    )
+    await ai.complete("owner", "first JSON", task="summary")
+    await ai.complete("owner", "second JSON", task="summary")
+    assert len(calls) == 2 and len(waits) == 1 and 4 < waits[0] < 6
+
+
+@pytest.mark.asyncio
+async def test_small_quiz_and_gemini_fallback_have_bounded_generation_settings():
+    seen = []
+
+    def handle(req):
+        seen.append(json.loads(req.content))
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"parts": [{"text": "{}"}]}}]}
+        )
+
+    ai = Gateway(
+        Settings(_env_file=None, gemini_api_key="test", ai_primary_provider="gemini"),
+        httpx.MockTransport(handle),
+    )
+    schema = {
+        "type": "object",
+        "properties": {"questions": {"type": "array", "maxItems": 3}},
+    }
+    await ai.complete(
+        "owner", "Generate three questions.", task="quiz", response_schema=schema
+    )
+    config = seen[0]["generationConfig"]
+    assert config["maxOutputTokens"] == 1260
+    assert config["thinkingConfig"] == {"thinkingLevel": "low"}
+    assert config["responseJsonSchema"] == schema
+
+
+@pytest.mark.asyncio
+async def test_exhausted_model_uses_only_existing_configured_model_fallback():
+    models = []
+
+    def handle(req):
+        model = json.loads(req.content)["model"]
+        models.append(model)
+        if model == "openai/gpt-oss-20b":
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "900"},
+                json={"error": {"message": "Rate limit on tokens per day (TPD)."}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"text":"ok"}'}, "finish_reason": "stop"}
+                ]
+            },
+        )
+
+    ai = Gateway(
+        Settings(
+            _env_file=None,
+            groq_api_key="test",
+            gemini_api_key="test",
+            ai_task_models={"verification": {"groq": "openai/gpt-oss-120b"}},
+        ),
+        httpx.MockTransport(handle),
+    )
+    result = await ai.complete("owner", "JSON study content", task="notes")
+    assert models == ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
+    assert result.model == "openai/gpt-oss-120b" and result.provider == "groq"
+    assert ai.status("owner")["recent_failures"][0]["quota"] == "tokens per day"

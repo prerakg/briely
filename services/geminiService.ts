@@ -75,8 +75,14 @@ export const generateMoreNotes = (source: string, notes: string) =>
   generate<string>(
     "notes",
     source,
-    "Return expanded complete notes incorporating these notes: " +
-      notes.slice(0, 9000),
+    "Return expanded complete notes. The existing notes contain " +
+      notes.split(/\s+/).filter(Boolean).length +
+      " words. Explain the covered concepts more deeply with source-grounded traces and comparisons, and aim for at least 20% more detail, up to 1600 words. Keep the useful structure and replace the complete document. Existing outline: " +
+      notes
+        .split("\n")
+        .filter((line) => /^#{1,3}\s/.test(line))
+        .join("\n")
+        .slice(0, 1600),
   );
 export const generateMindMap = (source: string) =>
   generate<string>("mindmap", source);

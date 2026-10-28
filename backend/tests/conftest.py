@@ -13,6 +13,8 @@ os.environ.update(
         "GROQ_API_KEY": "",
         "GEMINI_API_KEY": "",
         "XAI_API_KEY": "",
+        "RAPID_API_KEY": "",
+        "RAPID_API_HOST": "",
         "FRONTEND_URL": "http://localhost:3000",
         "REQUEST_LIMIT_PER_MINUTE": "10000",
     }

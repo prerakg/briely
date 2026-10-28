@@ -147,6 +147,20 @@ test("generate, edit, publish, second-browser guest attempt and creator analytic
   await page
     .getByRole("dialog", { name: "Quiz analytics" })
     .screenshot({ path: "artifacts/quiz-analytics.png" });
+  await page
+    .getByRole("dialog", { name: "Quiz analytics" })
+    .getByLabel("Close dialog")
+    .click();
+  await page
+    .getByRole("button", { name: "Study Planner", exact: true })
+    .click();
+  await page
+    .getByLabel("Quiz performance")
+    .selectOption({ label: "Shared biology challenge" });
+  await page
+    .getByRole("button", { name: "✦ Generate study plan", exact: true })
+    .click();
+  await expect(page.getByText("Saved plans", { exact: true })).toBeVisible();
   await recipient.close();
 });
 
@@ -182,6 +196,11 @@ test("two browsers join a live battle and receive authoritative final rankings",
       expires_at: null,
     },
   };
+  draft.questions.push({
+    ...draft.questions[0],
+    id: "battle-q2",
+    question: "Which gas do plants take in?",
+  });
   const q = await (
     await page.request.post("/api/v1/quizzes", { data: draft })
   ).json();
@@ -217,10 +236,27 @@ test("two browsers join a live battle and receive authoritative final rankings",
       .getByRole("button", { name: "Lock in answer", exact: true })
       .click();
   }
+  await expect(
+    page.getByRole("heading", { name: /Round 2\s*\/\s*2/ }),
+  ).toBeVisible({ timeout: 15000 });
+  await friend.reload();
+  for (const tab of [page, friend]) {
+    await expect(
+      tab.getByRole("heading", { name: /Round 2\s*\/\s*2/ }),
+    ).toBeVisible();
+    await tab
+      .locator("fieldset:not([disabled])")
+      .getByText("Carbon dioxide", { exact: true })
+      .click();
+    await tab
+      .getByRole("button", { name: "Lock in answer", exact: true })
+      .click();
+  }
   await expect(friend.getByText("THE FINAL STANDINGS")).toBeVisible({
     timeout: 20000,
   });
-  await expect(friend.getByText("1000", { exact: true })).toHaveCount(2);
+  await expect(friend.getByText("2000", { exact: true })).toHaveCount(2);
+  await expect(friend.getByText(/Battle complete/)).toBeVisible();
   await context.close();
 });
 
@@ -512,6 +548,7 @@ test("bulk study generation runs sequentially instead of exhausting the provider
         ],
       },
       notes: "# Study notes\nPlants use light.",
+      mindmap: 'graph TD\nA["Plants"] --> B["Light"]',
     };
     active--;
     await route.fulfill({
@@ -536,9 +573,15 @@ test("bulk study generation runs sequentially instead of exhausting the provider
   await expect(
     page.getByText("Plants use light.", { exact: true }),
   ).toBeVisible();
-  await expect.poll(() => tasks.length).toBe(4);
+  await expect.poll(() => tasks.length).toBe(5);
   expect(maxActive).toBe(1);
-  expect(tasks).toEqual(["summary", "flashcards", "quiz", "notes"]);
+  expect(tasks).toEqual(["summary", "flashcards", "quiz", "notes", "mindmap"]);
+  await page.getByRole("button", { name: "Mind Map", exact: true }).click();
+  await expect(page.locator(".mermaid-container svg")).toBeVisible();
+  await page.getByRole("button", { name: "Transcript", exact: true }).click();
+  await expect(
+    page.getByText(/Plants absorb carbon dioxide and use sunlight/).first(),
+  ).toBeVisible();
 });
 
 test("Create Quiz honors advanced types and difficulty in the actual editor flow", async ({
@@ -583,4 +626,117 @@ test("Create Quiz honors advanced types and difficulty in the actual editor flow
     page.once("dialog", (d) => d.accept());
     await page.getByRole("button", { name: "Close editor" }).click();
   }
+});
+
+test("document mind maps preserve quoted labels and support layout and zoom controls", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      "kragle_transcripts",
+      JSON.stringify([
+        {
+          id: "document-map",
+          title: "Document concept map",
+          transcriptText: "Weights [w] produce outputs.",
+          date: "2026-10-29",
+          duration: 0,
+          sessions: [],
+          chunks: [],
+          tags: ["Combined Resources"],
+          mindmap:
+            'graph TD\nn0["Weights [w] &quot;quoted&quot;"]\nn1["Outputs"]\nn0 --> n1',
+        },
+      ]),
+    ),
+  );
+  await page.goto("/");
+  await page.getByText("Document concept map", { exact: true }).first().click();
+  await page.getByRole("button", { name: "Mind Map", exact: true }).click();
+  await expect(page.locator(".mermaid-container svg")).toBeVisible();
+  await expect(
+    page.getByText("Failed to render mind map structure."),
+  ).toHaveCount(0);
+  await page.getByTitle("Tree Layout (Top-Down)", { exact: true }).click();
+  await expect(page.getByText("Vertical Tree", { exact: true })).toBeVisible();
+  await page.getByTitle("Zoom In", { exact: true }).click();
+  await expect(page.getByText("Zoom: 120%", { exact: true })).toBeVisible();
+  await page.getByTitle("Reset View", { exact: true }).click();
+  await expect(page.getByText("Zoom: 100%", { exact: true })).toBeVisible();
+});
+
+test("empty documents fail before creating an unusable study source", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTitle("Upload Resources").click();
+  await page.locator("input[type=file][multiple]").setInputFiles({
+    name: "empty.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("   "),
+  });
+  await page
+    .getByRole("button", { name: "Combine & Generate", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("No readable text");
+  expect(
+    await page.evaluate(
+      () =>
+        JSON.parse(localStorage.getItem("kragle_transcripts") || "[]").length,
+    ),
+  ).toBe(0);
+});
+
+test("library rename, tags, search, and deletion preserve other lectures", async ({
+  page,
+}) => {
+  await seed(page);
+  await page.goto("/");
+  await page.getByText("Biology foundations", { exact: true }).first().click();
+  await page.getByTitle("Click to rename").click();
+  await page
+    .getByLabel("Lecture title", { exact: true })
+    .fill("Renamed biology lesson");
+  await page.getByLabel("Lecture title", { exact: true }).press("Enter");
+  await page.getByRole("button", { name: "+ Add Tag", exact: true }).click();
+  await page.getByPlaceholder("New tag...").fill("revision");
+  await page.getByPlaceholder("New tag...").press("Enter");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => JSON.parse(localStorage.getItem("kragle_transcripts")!)[0].tags,
+      ),
+    )
+    .toEqual(["revision"]);
+  await page
+    .getByRole("button", { name: "Remove tag revision", exact: true })
+    .click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => JSON.parse(localStorage.getItem("kragle_transcripts")!)[0].tags,
+      ),
+    )
+    .toEqual([]);
+  await page.getByPlaceholder("Search lectures...").fill("carbon dioxide");
+  await expect(
+    page
+      .getByRole("button")
+      .filter({ hasText: "Renamed biology lesson" })
+      .first(),
+  ).toBeVisible();
+  await page.getByPlaceholder("Search lectures...").fill("not-a-real-lecture");
+  await expect(
+    page.getByRole("button").filter({ hasText: "Renamed biology lesson" }),
+  ).toHaveCount(0);
+  await page.getByPlaceholder("Search lectures...").fill("");
+  page.once("dialog", (d) => d.accept());
+  await page.getByTitle("Delete Lecture").click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => JSON.parse(localStorage.getItem("kragle_transcripts")!).length,
+      ),
+    )
+    .toBe(0);
 });

@@ -43,6 +43,7 @@ function createBlob(data: Float32Array): { data: string; mimeType: string } {
 
 const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }) => {
     const [isRecording, setIsRecording] = useState(false);
+    const [isConnecting, setIsConnecting] = useState(false);
     const [transcript, setTranscript] = useState('');
     const [elapsedTime, setElapsedTime] = useState(0);
     const [error, setError] = useState<string | null>(null);
@@ -59,6 +60,8 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
     const turnStartTimeRef = useRef<number>(0);
     const isTurnActiveRef = useRef(false);
     const elapsedTimeRef = useRef(0);
+    const recordingEpoch = useRef(0);
+    const previewEpoch = useRef(0);
 
     // Media/Session Refs
     const streamRef = useRef<MediaStream | null>(null);
@@ -75,6 +78,7 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
 
     // Cleanup function
     const stopEverything = () => {
+        recordingEpoch.current += 1;
         if (processorRef.current) {
             processorRef.current.disconnect();
             processorRef.current = null;
@@ -103,6 +107,7 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
     };
 
     const stopPreview = () => {
+        previewEpoch.current += 1;
         if (previewAnimationFrameRef.current) {
             cancelAnimationFrame(previewAnimationFrameRef.current);
             previewAnimationFrameRef.current = null;
@@ -120,12 +125,14 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
 
     const startPreview = async (deviceId: string) => {
         stopPreview();
+        const epoch = previewEpoch.current;
         if (!deviceId) return;
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: { deviceId: { exact: deviceId } }
             });
+            if (epoch !== previewEpoch.current) { stream.getTracks().forEach(track => track.stop()); return; }
             previewStreamRef.current = stream;
 
             const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -200,6 +207,9 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
     }, [selectedDeviceId, isRecording, transcript]);
 
     const startRecording = async () => {
+        if (isConnecting) return;
+        setIsConnecting(true);
+        const epoch = ++recordingEpoch.current;
         setError(null);
         if (!startTime) setStartTime(new Date().toISOString());
         if (currentTurnRef.current.trim()) {
@@ -213,12 +223,15 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
         stopPreview();
 
         try {
-            const credentials = await creatorRequest<{token:string;model:string}>('/ai/live-token', {method:'POST'});
-            const ai = new GoogleGenAI({ apiKey: credentials.token, httpOptions: {apiVersion:'v1alpha'} });
-
             const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
             const audioContext = new AudioContextClass({ sampleRate: 16000 });
             audioContextRef.current = audioContext;
+            await audioContext.resume();
+            if (epoch !== recordingEpoch.current) return;
+
+            const credentials = await creatorRequest<{token:string;model:string}>('/ai/live-token', {method:'POST'});
+            if (epoch !== recordingEpoch.current) return;
+            const ai = new GoogleGenAI({ apiKey: credentials.token, httpOptions: {apiVersion:'v1alpha'} });
 
             // Use the selected device ID
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -228,6 +241,7 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
                     sampleRate: 16000
                 }
             });
+            if (epoch !== recordingEpoch.current) { stream.getTracks().forEach(track => track.stop()); return; }
             streamRef.current = stream;
 
             const sessionPromise = ai.live.connect({
@@ -239,6 +253,7 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
                 },
                 callbacks: {
                     onopen: () => {
+                        if (epoch !== recordingEpoch.current) return;
                         setIsRecording(true);
 
                         timerRef.current = window.setInterval(() => {
@@ -256,8 +271,9 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
                             const inputData = e.inputBuffer.getChannelData(0);
                             const pcmBlob = createBlob(inputData);
                             sessionPromise.then(session => {
+                                if (epoch !== recordingEpoch.current) return;
                                 sessionRef.current = session;
-                                session.sendRealtimeInput({ media: pcmBlob });
+                                session.sendRealtimeInput({ audio: pcmBlob });
                             });
                         };
 
@@ -265,6 +281,7 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
                         processor.connect(audioContext.destination);
                     },
                     onmessage: (message: LiveServerMessage) => {
+                        if (epoch !== recordingEpoch.current) return;
                         const content = message.serverContent;
                         let needsUpdate = false;
 
@@ -307,8 +324,9 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
                             setTranscript(fullText);
                         }
                     },
-                    onclose: () => stopEverything(),
+                    onclose: () => {if (epoch === recordingEpoch.current) stopEverything();},
                     onerror: (e) => {
+                        if (epoch !== recordingEpoch.current) return;
                         let msg = "Connection error. Please try again.";
                         if (e instanceof Error) msg = e.message;
                         setError(msg);
@@ -316,24 +334,45 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
                     }
                 }
             });
-            sessionRef.current = await sessionPromise;
+            const session = await sessionPromise;
+            if (epoch !== recordingEpoch.current) { session.close(); return; }
+            sessionRef.current = session;
 
         } catch (err: any) {
             setError(err.message || "Could not start recording");
             stopEverything();
+        } finally {
+            setIsConnecting(false);
+        }
+    };
+
+    const pauseRecording = async () => {
+        setIsConnecting(true);
+        processorRef.current?.disconnect();
+        sourceRef.current?.disconnect();
+        streamRef.current?.getTracks().forEach(track => track.stop());
+        if (timerRef.current) { window.clearInterval(timerRef.current); timerRef.current = null; }
+        try {
+            sessionRef.current?.sendRealtimeInput({audioStreamEnd: true});
+            await new Promise(resolve => window.setTimeout(resolve, 1200));
+        } finally {
+            stopEverything();
+            setIsConnecting(false);
         }
     };
 
     const toggleRecording = () => {
+        if (isConnecting) return;
         if (isRecording) {
-            stopEverything();
+            void pauseRecording();
         } else {
             startRecording();
         }
     };
 
-    const handleFinish = () => {
-        if (isRecording) stopEverything();
+    const handleFinish = async () => {
+        if (isConnecting) return;
+        if (isRecording) await pauseRecording();
 
         if (currentTurnRef.current.trim()) {
             const newChunk: TranscriptChunk = {
@@ -348,6 +387,7 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
         }
 
         const finalTranscript = chunksRef.current.map(c => c.text).join(' ');
+        if (!finalTranscript.trim()) { setError('No speech was captured. Resume recording and try again.'); return; }
 
         onFinish({
             startTime: startTime || new Date().toISOString(),
@@ -447,6 +487,8 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
 
                 <button
                     onClick={toggleRecording}
+                    disabled={isConnecting}
+                    aria-label={isConnecting ? 'Preparing microphone' : isRecording ? 'Pause recording' : startTime ? 'Resume recording' : 'Start recording'}
                     className={`h-16 w-16 rounded-full flex items-center justify-center transition-all duration-300 shadow-lg ${isRecording
                             ? 'bg-red-500 hover:bg-red-600 ring-4 ring-red-200'
                             : 'bg-indigo-600 hover:bg-indigo-700 ring-4 ring-indigo-200'
@@ -461,7 +503,7 @@ const Recorder: React.FC<RecorderProps> = ({ onFinish, onCancel, existingTitle }
 
                 <button
                     onClick={handleFinish}
-                    disabled={transcript.length === 0 && !isRecording}
+                    disabled={isConnecting || (transcript.length === 0 && !isRecording)}
                     className="px-6 py-3 rounded-full bg-slate-900 text-white font-medium hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                     Finish & Save

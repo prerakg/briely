@@ -18,7 +18,7 @@ export default defineConfig({
       timeout: 30000,
     },
     {
-      command: "npm run dev -- --port 3100 --strictPort",
+      command: "npm run dev:frontend -- --port 3100 --strictPort",
       env: { BRIEFLY_API_PROXY_TARGET: "http://127.0.0.1:8100" },
       url: "http://localhost:3100",
       reuseExistingServer: false,

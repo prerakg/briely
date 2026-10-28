@@ -14,6 +14,8 @@ os.environ.update(
         "GROQ_API_KEY": "",
         "GEMINI_API_KEY": "",
         "XAI_API_KEY": "",
+        "RAPID_API_KEY": "",
+        "RAPID_API_HOST": "",
         "SUPABASE_URL": "",
         "SUPABASE_ANON_KEY": "",
         "FRONTEND_URL": "http://localhost:3100",
@@ -25,6 +27,8 @@ from backend.app.agents import workflows
 from backend.app.providers import Completion
 from backend.app.models import engine
 from backend.app.schemas import Question
+from backend.app import main as api_module
+from fastapi import HTTPException
 
 
 class ControlledAI:
@@ -103,7 +107,13 @@ class ControlledAI:
                 "text": "# Seven-day revision plan\nDay 1: Review photosynthesis.\nDay 2: Practice active recall."
             }
         elif "Produce mindmap" in prompt:
-            value = {"text": 'graph TD\nA["Photosynthesis"] --> B["Carbon dioxide"]'}
+            value = {
+                "nodes": [
+                    {"id": "n0", "label": "Photosynthesis"},
+                    {"id": "n1", "label": "Carbon dioxide"},
+                ],
+                "edges": [{"source": "n0", "target": "n1"}],
+            }
         elif "Produce notes" in prompt:
             value = {"text": "# Photosynthesis\nPlants absorb carbon dioxide."}
         elif "learner" in prompt:
@@ -114,6 +124,44 @@ class ControlledAI:
 
 
 workflows.ai = ControlledAI()
+
+
+async def controlled_subtitles(video_id, settings, language=None):
+    if video_id == "aaaaaaaaaaa":
+        raise HTTPException(
+            429,
+            "The caption service quota or rate limit was reached. Please try again later.",
+        )
+    return [
+        {
+            "languageCode": "en",
+            "subtitle": "1\r\n00:00:01,250 --> 00:00:03,500\r\nPlants &amp; light.\r\n\r\n2\r\n00:00:04,000 --> 00:00:05,000\r\n42",
+        },
+        {
+            "languageCode": "hi",
+            "subtitle": [
+                {"start": "2.5", "dur": "2", "text": "पौधे प्रकाश का उपयोग करते हैं।"}
+            ],
+        },
+        {
+            "languageCode": "es",
+            "subtitle": "WEBVTT\n\n00:01.750 --> 00:03.000\nLas plantas usan luz.",
+        },
+        {"languageCode": "bad", "subtitle": None},
+    ]
+
+
+api_module.fetch_subtitles = controlled_subtitles
+
+
+async def controlled_languages(video_id, settings):
+    tracks = await controlled_subtitles(video_id, settings)
+    return [
+        {"languageCode": track["languageCode"]} for track in tracks if track["subtitle"]
+    ]
+
+
+api_module.list_subtitles = controlled_languages
 if __name__ == "__main__":
     import uvicorn
 

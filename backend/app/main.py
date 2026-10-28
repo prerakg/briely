@@ -56,6 +56,7 @@ from .providers import gateway, AIError
 from .agents import workflows
 from .quiz_service import own_quiz, live_version, public_quiz, grade, validate_answers
 from .rooms import load_room, snapshot
+from .youtube import fetch_subtitles, list_subtitles
 
 settings = get_settings()
 log = logging.getLogger("briefly")
@@ -489,29 +490,15 @@ async def image_text(request: Request, user=Depends(owner)):
 
 
 @api.get("/youtube/{video_id}")
-async def youtube(video_id: str, user=Depends(owner)):
-    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
-        raise HTTPException(422, "Invalid YouTube video ID")
-    if not settings.rapid_api_key or not re.fullmatch(
-        r"[a-z0-9-]+\.p\.rapidapi\.com", settings.rapid_api_host
-    ):
-        raise HTTPException(
-            503, "Configure RAPID_API_KEY and RAPID_API_HOST on the backend"
-        )
-    async with httpx.AsyncClient(timeout=40) as client:
-        r = await client.get(
-            f"https://{settings.rapid_api_host}/download-all/{video_id}",
-            params={"format_subtitle": "srt", "format_answer": "json"},
-            headers={
-                "x-rapidapi-host": settings.rapid_api_host,
-                "x-rapidapi-key": settings.rapid_api_key,
-            },
-        )
-    if r.status_code != 200:
-        raise HTTPException(
-            502, "Transcript provider failed or captions are unavailable"
-        )
-    return r.json()
+async def youtube(video_id: str, language: str | None = None, user=Depends(owner)):
+    limiter.check("youtube:" + user, 12)
+    return await fetch_subtitles(video_id, settings, language)
+
+
+@api.get("/youtube/{video_id}/languages")
+async def youtube_languages(video_id: str, user=Depends(owner)):
+    limiter.check("youtube-list:" + user, 12)
+    return await list_subtitles(video_id, settings)
 
 
 @api.post("/agents/quiz")

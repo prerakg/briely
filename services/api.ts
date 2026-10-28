@@ -35,16 +35,23 @@ export async function request<T>(
       headers: { "Content-Type": "application/json", ...init.headers },
       signal: controller.signal,
     });
-    const data = await response.json().catch(() => ({}));
+    const data = await response.json().catch(() => null);
     if (!response.ok) {
       const detail =
-        typeof data.detail === "string"
+        typeof data?.detail === "string"
           ? data.detail
-          : Array.isArray(data.detail)
+          : Array.isArray(data?.detail)
             ? data.detail.map((e: { msg: string }) => e.msg).join("; ")
-            : "Request failed";
+            : response.status >= 500
+              ? "Cannot reach the API server. Run npm run dev to start the frontend and backend together."
+              : "Request failed";
       throw new ApiError(detail, response.status);
     }
+    if (data === null)
+      throw new ApiError(
+        "The API returned an invalid response. Please try again.",
+        response.status,
+      );
     return data as T;
   } catch (e) {
     if (e instanceof ApiError) throw e;

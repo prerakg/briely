@@ -22,18 +22,28 @@ For a new database, initialize migrations:
 
 Development startup also creates missing tables for convenience. If an existing development database was auto-created without migration history, inspect its schema before using `alembic stamp head`; never blindly stamp a different schema. Migration commands against a hosted database require explicit approval.
 
-Start two terminals:
+Start the app in one terminal:
 
 ```powershell
-# Terminal 1
-.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
-# Terminal 2
 npm run dev
 ```
 
 Open http://localhost:3000. API documentation: http://127.0.0.1:8000/docs. No API key is necessary to write a manual quiz, publish it, take it or run a battle. AI generation requires a configured provider. Real microphone transcription and image OCR require Gemini. Multilingual YouTube import requires the existing RapidAPI subtitle service.
 
-On macOS/Linux use `.venv/bin/python` in place of `.venv\Scripts\python.exe`. To use `npm run backend` or `npm run test:backend`, activate the virtual environment first; those convenience commands use the active `python`.
+`npm run dev` selects the project's `.venv` Python, starts the real API on port 8000, waits for its health check, then starts Vite on port 3000. Stop an older frontend-only Vite process before switching to this command. Ctrl+C stops both services. Missing Python/dependencies or an occupied port produce a startup error; Vite does not silently switch ports. Restart after changing backend code or environment settings.
+
+On macOS/Linux:
+
+```sh
+python3.12 -m venv .venv # Any installed Python 3.11+ works.
+.venv/bin/python -m pip install -r backend/requirements.txt
+npm ci
+npm run dev
+```
+
+`npm run backend` and `npm run test:backend` also select `.venv` automatically. Set `BRIEFLY_PYTHON` to an alternative Python executable if needed. To manage the servers separately, run `npm run backend` in one terminal and `npm run dev:frontend` in another. `dev:frontend` uses `BRIEFLY_API_PROXY_TARGET` when provided and otherwise proxies to port 8000. An `ECONNREFUSED 127.0.0.1:8000` error means the API process is absent or failed to start; check its terminal rather than changing provider credentials in frontend code.
+
+YouTube accepts watch, youtu.be, Shorts, live and embed URLs. A video needs available captions; the API reports missing captions, denied provider access, quota limits and timeouts separately. Optional title lookup has a four-second timeout and falls back to the video ID. Provider credentials stay on the backend.
 
 ## Tests
 

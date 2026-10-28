@@ -1120,6 +1120,11 @@ export default function QuizStudio({
                       }),
                     );
                     setPlan(r.result);
+                    setSavedPlans(
+                      await creatorRequest<
+                        { id: string; content: string; created: number }[]
+                      >("/study-plans"),
+                    );
                     await refresh();
                   })
                 }

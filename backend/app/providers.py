@@ -35,7 +35,9 @@ class Gateway:
         self.failures = deque(maxlen=20)
         self.usage = {}
         self.locks = {}
-        self.slots = {p: asyncio.Semaphore(1) for p in ("groq", "gemini", "xai")}
+        self.rate_windows = {}
+        self.token_limits = {}
+        self.slots = {}
 
     def configured(self):
         return {
@@ -87,7 +89,8 @@ class Gateway:
         lock = entry[0]
         try:
             async with lock:
-                cacheable = task != "quiz"
+                # A raw schema-bound candidate has not passed application validation.
+                cacheable = task != "quiz" and response_schema is None
                 cached = self.cache.get(key) if cacheable else None
                 if cached and cached[0] > time.time():
                     c = cached[1]
@@ -109,11 +112,27 @@ class Gateway:
                     raise AIError(
                         "Configure GROQ_API_KEY or GEMINI_API_KEY on the backend."
                     )
-                failures = []
+                routes = []
                 for provider in order:
+                    models = [providers[provider]]
+                    # Reuse only models the owner already configured for this provider.
+                    models.extend(
+                        mapping[provider]
+                        for mapping in self.settings.ai_task_models.values()
+                        if mapping.get(provider)
+                    )
+                    routes.extend((provider, model) for model in dict.fromkeys(models))
+                failures = []
+                for provider, selected_model in routes:
                     for attempt in range(2):
                         try:
-                            async with self.slots[provider]:
+                            slot = self.slots.setdefault(
+                                (provider, selected_model), asyncio.Semaphore(1)
+                            )
+                            async with slot:
+                                await self.wait_for_capacity(
+                                    provider, selected_model, prompt, task
+                                )
                                 async with httpx.AsyncClient(
                                     timeout=self.settings.ai_timeout,
                                     transport=self.transport,
@@ -123,16 +142,21 @@ class Gateway:
                                         provider,
                                         prompt,
                                         structured,
-                                        providers[provider],
+                                        selected_model,
                                         task,
                                         response_schema,
                                     )
+                                self.remember_capacity(
+                                    provider, selected_model, response
+                                )
                             if response.status_code >= 400:
                                 self.failures.append(
                                     {
                                         "owner": owner,
                                         "provider": provider,
                                         "status": response.status_code,
+                                        "model": selected_model,
+                                        "quota": self.quota_kind(response),
                                         "at": time.time(),
                                     }
                                 )
@@ -154,7 +178,12 @@ class Gateway:
                                         await asyncio.sleep(delay)
                                         continue
                                 failures.append(
-                                    f"{provider}: HTTP {response.status_code}"
+                                    f"{provider}/{selected_model}: HTTP {response.status_code}"
+                                    + (
+                                        " (" + self.quota_kind(response) + ")"
+                                        if self.quota_kind(response)
+                                        else ""
+                                    )
                                 )
                                 break
                             if response.status_code >= 400:
@@ -163,7 +192,7 @@ class Gateway:
                                     code = provider_error.get("code")
                                 except (ValueError, AttributeError):
                                     code = None
-                                if task == "quiz" and code == "json_validate_failed":
+                                if code == "json_validate_failed":
                                     # This is a generated-output failure, not bad credentials/configuration.
                                     # Inspect only structure/counts; never retain the provider body or source.
                                     metadata = {
@@ -189,7 +218,7 @@ class Gateway:
                                         metadata["json_complete"] = False
                                     self.failures.append(metadata)
                                     raise AIError(
-                                        "AI generated malformed JSON. The provider could not finish the constrained quiz response.",
+                                        "AI generated malformed JSON. The provider could not finish the constrained response.",
                                         502,
                                     )
                                 raise AIError(
@@ -220,9 +249,7 @@ class Gateway:
                                 )
                             if not text:
                                 raise AIError("AI returned no usable content", 502)
-                            result = Completion(
-                                text, provider, providers[provider], tokens
-                            )
+                            result = Completion(text, provider, selected_model, tokens)
                             usage = self.usage.setdefault(
                                 owner, {"requests": 0, "tokens": 0}
                             )
@@ -251,13 +278,76 @@ class Gateway:
                 raise AIError(
                     "AI providers are rate limited or unavailable ("
                     + "; ".join(failures)
-                    + "). Please wait a minute and retry one study tool.",
+                    + "). Retry after the provider quota resets or configure another available model.",
                     503,
                 )
         finally:
             entry[1] -= 1
             if entry[1] == 0:
                 self.locks.pop(key, None)
+
+    @staticmethod
+    def quota_kind(response):
+        if response.status_code != 429:
+            return None
+        try:
+            message = response.json().get("error", {}).get("message", "").lower()
+            for phrase in (
+                "tokens per day",
+                "requests per day",
+                "tokens per minute",
+                "requests per minute",
+            ):
+                if phrase in message:
+                    return phrase
+        except (ValueError, AttributeError):
+            pass
+        return "provider quota"
+
+    @staticmethod
+    def duration_seconds(value):
+        if not isinstance(value, str):
+            return None
+        parts = re.findall(r"(\d+(?:\.\d+)?)(ms|s|m|h)", value)
+        if (
+            not parts
+            or "".join(number + unit for number, unit in parts) != value.strip()
+        ):
+            return None
+        return sum(
+            float(number) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[unit]
+            for number, unit in parts
+        )
+
+    def remember_capacity(self, provider, model, response):
+        limit = response.headers.get("x-ratelimit-limit-tokens")
+        if limit:
+            try:
+                self.token_limits[(provider, model)] = int(limit)
+            except ValueError:
+                pass
+        remaining = response.headers.get("x-ratelimit-remaining-tokens")
+        reset = self.duration_seconds(response.headers.get("x-ratelimit-reset-tokens"))
+        if remaining is not None and reset is not None:
+            try:
+                self.rate_windows[(provider, model)] = (
+                    int(remaining),
+                    time.monotonic() + reset,
+                )
+            except ValueError:
+                pass
+
+    async def wait_for_capacity(self, provider, model, prompt, task):
+        window = self.rate_windows.get((provider, model))
+        if not window:
+            return
+        remaining, reset = window
+        # Reserve a conservative input estimate plus this task's output budget.
+        needed = len(prompt) // 3 + self.output_budget(task)
+        wait = reset - time.monotonic() + 0.25
+        if remaining < needed and 0 < wait <= self.settings.ai_rate_limit_wait_seconds:
+            await asyncio.sleep(wait)
+            self.rate_windows.pop((provider, model), None)
 
     @staticmethod
     def retry_delay(value):
@@ -279,6 +369,18 @@ class Gateway:
             ),
         )
 
+    def request_budget(self, provider, model, task, prompt, schema):
+        budget = self.output_budget(task)
+        if task == "quiz" and schema:
+            count = (
+                schema.get("properties", {}).get("questions", {}).get("maxItems", 10)
+            )
+            budget = min(budget, max(1200, count * 420))
+        limit = self.token_limits.get((provider, model))
+        if limit:
+            budget = min(budget, max(1024, limit - len(prompt) // 3 - 256))
+        return budget
+
     @classmethod
     def response_retry_delay(cls, response):
         header = response.headers.get("Retry-After")
@@ -287,12 +389,11 @@ class Gateway:
         try:
             # Extract only a duration, never log or expose the provider response body.
             message = response.json().get("error", {}).get("message", "")
-            match = re.search(r"try again in (\d+(?:\.\d+)?)\s*(ms|s|m)", message, re.I)
+            match = re.search(
+                r"try again in ((?:\d+(?:\.\d+)?(?:ms|s|m|h))+)", message, re.I
+            )
             if match:
-                return (
-                    float(match[1]) * {"ms": 0.001, "s": 1, "m": 60}[match[2].lower()]
-                    + 0.25
-                )
+                return cls.duration_seconds(match[1].lower()) + 0.25
         except (ValueError, TypeError, AttributeError):
             pass
         return 1
@@ -315,10 +416,18 @@ class Gateway:
             body = {
                 "system_instruction": {"parts": [{"text": system}]},
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": self.output_budget(task)},
+                "generationConfig": {
+                    "maxOutputTokens": self.request_budget(
+                        provider, model, task, prompt, response_schema
+                    )
+                },
             }
+            if model.startswith(("gemini-3", "gemini-4")):
+                body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
             if structured:
                 body["generationConfig"]["responseMimeType"] = "application/json"
+                if response_schema:
+                    body["generationConfig"]["responseJsonSchema"] = response_schema
             return await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                 headers={"x-goog-api-key": api_key},
@@ -335,7 +444,9 @@ class Gateway:
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": self.output_budget(task),
+            "max_tokens": self.request_budget(
+                provider, model, task, prompt, response_schema
+            ),
             "temperature": 0.3,
         }
         if provider == "groq" and model.startswith("openai/gpt-oss"):
@@ -350,7 +461,7 @@ class Gateway:
                 body["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {
-                        "name": "source_grounded_quiz",
+                        "name": "source_grounded_" + task,
                         "strict": True,
                         "schema": response_schema,
                     },

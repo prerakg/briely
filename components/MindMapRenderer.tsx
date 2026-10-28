@@ -63,6 +63,7 @@ const MindMapRenderer: React.FC<MindMapRendererProps> = ({ chart }) => {
     }, []);
 
     useEffect(() => {
+        let cancelled = false;
         const renderChart = async () => {
             if (containerRef.current && chart) {
                 try {
@@ -70,11 +71,11 @@ const MindMapRenderer: React.FC<MindMapRendererProps> = ({ chart }) => {
                     // Unique ID for the diagram
                     const id = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
                     
-                    // 1. Sanitize: Fix quotes
-                    let safeChart = chart.replace(/\[([^"\]]+?)\]/g, '["$1"]');
+                    // Preserve quoted labels, including brackets inside their text.
+                    let safeChart = chart.trim().replace(/^```(?:mermaid)?\s*\n?/i, '').replace(/\n?```\s*$/, '').trim();
                     
                     // 2. Structure: Replace 'graph LR' or 'graph TD' with current layout
-                    safeChart = safeChart.replace(/^graph [A-Z]+/, `graph ${layout}`);
+                    safeChart = safeChart.replace(/^(?:graph|flowchart)\s+(?:TD|TB|LR|RL|BT)\b/, `graph ${layout}`);
                     
                     // 3. Style Injection: 
                     // Use simple HEX colors in Mermaid to satisfy the parser.
@@ -92,7 +93,7 @@ const MindMapRenderer: React.FC<MindMapRendererProps> = ({ chart }) => {
                     
                     const { svg } = await mermaid.render(id, finalChart);
                     
-                    if (containerRef.current) {
+                    if (!cancelled && containerRef.current) {
                         containerRef.current.innerHTML = svg;
                         
                         // Post-processing to ensure SVG scales nicely in our zoom container
@@ -100,17 +101,19 @@ const MindMapRenderer: React.FC<MindMapRendererProps> = ({ chart }) => {
                         if (svgElement) {
                             svgElement.style.height = '100%';
                             svgElement.style.width = '100%';
+                            svgElement.style.maxWidth = 'none';
+                            svgElement.setAttribute('preserveAspectRatio', 'xMidYMid meet');
                             svgElement.style.overflow = 'visible'; // Important for cropping issues
                         }
                     }
                 } catch (error) {
-                    console.error("Mermaid rendering failed:", error);
-                    setRenderError(true);
+                    if (!cancelled) setRenderError(true);
                 }
             }
         };
 
         renderChart();
+        return () => { cancelled = true; };
     }, [chart, layout]);
 
     // Pan/Zoom Handlers
@@ -230,7 +233,7 @@ const MindMapRenderer: React.FC<MindMapRendererProps> = ({ chart }) => {
                         transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                     }}
                 >
-                    <div ref={containerRef} className="mermaid-container" />
+                    <div ref={containerRef} className="mermaid-container w-full h-full p-6" />
                 </div>
                 
                 {renderError && (

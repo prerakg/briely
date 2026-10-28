@@ -27,6 +27,7 @@ const App = () => {
   const [selectedLectureId, setSelectedLectureId] = useState<string | null>(null);
   const [processingFailures, setProcessingFailures] = useState<string[]>([]);
   const [isProcessingId, setIsProcessingId] = useState<string | null>(null);
+  const [processingStatus, setProcessingStatus] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   
@@ -43,6 +44,7 @@ const App = () => {
   // YouTube Import State
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [isFetchingYoutube, setIsFetchingYoutube] = useState(false);
+  const [youtubeError, setYoutubeError] = useState<string | null>(null);
   const [fetchedVideoData, setFetchedVideoData] = useState<YoutubeService.YoutubeVideoResult | null>(null);
   const [selectedLangIndex, setSelectedLangIndex] = useState<number>(0);
 
@@ -79,6 +81,7 @@ const App = () => {
   const resetYoutubeModal = () => {
       setShowYoutubeModal(false);
       setYoutubeUrl('');
+      setYoutubeError(null);
       setFetchedVideoData(null);
       setIsFetchingYoutube(false);
       setSelectedLangIndex(0);
@@ -167,44 +170,48 @@ const App = () => {
     try {
         const transcript = lecture.transcriptText;
         const tasks: (() => Promise<unknown>)[] = [];
+        const taskLabels: string[] = [];
         const optionsToRun = { ...options };
 
-        if (lecture.tags?.includes('Combined Resources')) {
-            optionsToRun.mindmap = false;
-        }
 
         if (optionsToRun.summary) {
+            taskLabels.push('Summary');
             tasks.push(() => GeminiService.generateSummary(transcript)
                 .then(summary => updateLocally({ summary }))
                 .catch(e => failures.push("Summary: " + (e.message || "Generation failed"))));
         }
 
         if (optionsToRun.flashcards) {
+            taskLabels.push('Flashcards');
             tasks.push(() => GeminiService.generateFlashcards(transcript)
                 .then(flashcards => updateLocally({ flashcards }))
                 .catch(e => failures.push("Flashcards: " + (e.message || "Generation failed"))));
         }
             
         if (optionsToRun.quiz) {
+            taskLabels.push('Practice Quiz');
             tasks.push(() => GeminiService.generateQuiz(transcript)
                 .then(quiz => updateLocally({ quiz }))
                 .catch(e => failures.push("Quiz: " + (e.message || "Generation failed"))));
         }
 
         if (optionsToRun.notes) {
+            taskLabels.push('Notes');
             tasks.push(() => GeminiService.generateStudyNotes(transcript)
                 .then(studyNotes => updateLocally({ studyNotes }))
                 .catch(e => failures.push("Notes: " + (e.message || "Generation failed"))));
         }
 
         if (optionsToRun.mindmap) {
+            taskLabels.push('Mind Map');
             tasks.push(() => GeminiService.generateMindMap(transcript)
                 .then(mindmap => updateLocally({ mindmap }))
                 .catch(e => failures.push("Mindmap: " + (e.message || "Generation failed"))));
         }
 
-        for (const task of tasks) {
-            await task();
+        for (let index = 0; index < tasks.length; index++) {
+            setProcessingStatus(`Generating ${taskLabels[index]} (${index + 1} of ${tasks.length})…`);
+            await tasks[index]();
             setProcessingFailures([...failures]);
         }
         
@@ -243,8 +250,9 @@ const App = () => {
 
   // Step 1: Fetch details
   const handleFetchYoutubeDetails = async () => {
-      if (!youtubeUrl.trim()) return;
+      if (!youtubeUrl.trim() || isFetchingYoutube) return;
       setIsFetchingYoutube(true);
+      setYoutubeError(null);
       setFetchedVideoData(null);
 
       try {
@@ -254,18 +262,22 @@ const App = () => {
           const enIndex = result.transcripts.findIndex(t => t.languageCode.startsWith('en'));
           setSelectedLangIndex(enIndex >= 0 ? enIndex : 0);
       } catch (error: any) {
-          alert(error.message || "Failed to import YouTube video.");
+          setYoutubeError(error.message || "Failed to import YouTube video.");
       } finally {
           setIsFetchingYoutube(false);
       }
   };
 
   // Step 2: Confirm Import
-  const handleConfirmYoutubeImport = () => {
-      if (!fetchedVideoData) return;
+  const handleConfirmYoutubeImport = async () => {
+      if (!fetchedVideoData || isFetchingYoutube) return;
 
-      const selectedTranscript = fetchedVideoData.transcripts[selectedLangIndex];
+      let selectedTranscript = fetchedVideoData.transcripts[selectedLangIndex];
       if (!selectedTranscript) return;
+      setYoutubeError(null);
+      setIsFetchingYoutube(true);
+      try {
+      if (!selectedTranscript.text) selectedTranscript = await YoutubeService.getYoutubeTranscript(fetchedVideoData.videoId, selectedTranscript.languageCode);
 
       // Calculate duration from chunks (use last chunk timestamp as approximation)
       let videoDuration = 0;
@@ -304,6 +316,11 @@ const App = () => {
       // Trigger AI Generation immediately
       setPendingLectureId(id);
       setTimeout(() => setShowGenModal(true), 500);
+      } catch (error: any) {
+          setYoutubeError(error.message || "Failed to import this caption language.");
+      } finally {
+          setIsFetchingYoutube(false);
+      }
   };
 
   const handleCombinedUploadComplete = (combinedText: string, titles: string[]) => {
@@ -395,7 +412,6 @@ const App = () => {
                         icon="📚"
                     />
                     
-                    {(!pendingLectureId || !lectures.find(l => l.id === pendingLectureId)?.tags?.includes('Combined Resources')) && (
                         <OptionCheckbox 
                             label="Mind Map" 
                             desc="Visual diagram of concepts"
@@ -403,7 +419,6 @@ const App = () => {
                             onChange={(v: boolean) => setGenOptions(prev => ({...prev, mindmap: v}))}
                             icon={<MapIcon className="w-6 h-6 text-pink-500" />}
                         />
-                    )}
                 </div>
 
                 <div className="p-4 bg-slate-50 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex gap-3 justify-end">
@@ -446,11 +461,15 @@ const App = () => {
                     {!fetchedVideoData ? (
                         // Step 1: Input URL
                         <>
-                            <label className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">YouTube Video URL</label>
+                            <label htmlFor="youtube-url" className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">YouTube Video URL</label>
                             <input 
+                                id="youtube-url"
                                 type="text" 
                                 value={youtubeUrl}
-                                onChange={(e) => setYoutubeUrl(e.target.value)}
+                                onChange={(e) => { setYoutubeUrl(e.target.value); setYoutubeError(null); }}
+                                disabled={isFetchingYoutube}
+                                aria-invalid={!!youtubeError}
+                                aria-describedby={youtubeError ? 'youtube-error' : undefined}
                                 placeholder="https://www.youtube.com/watch?v=..."
                                 className="w-full px-4 py-2 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-50 border border-slate-300 dark:border-slate-600 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none transition-all"
                                 autoFocus
@@ -469,15 +488,17 @@ const App = () => {
                             </div>
                             
                             <div>
-                                <label className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">Select Transcript Language</label>
+                                <label htmlFor="youtube-language" className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">Select Transcript Language</label>
                                 <select 
+                                    id="youtube-language"
+                                    disabled={isFetchingYoutube}
                                     value={selectedLangIndex}
                                     onChange={(e) => setSelectedLangIndex(Number(e.target.value))}
                                     className="w-full px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none bg-white dark:bg-slate-900"
                                 >
                                     {fetchedVideoData.transcripts.map((t, idx) => (
                                         <option key={idx} value={idx}>
-                                            {t.languageCode.toUpperCase()} — {t.text.length < 100 ? 'Short' : 'Full'} Transcript
+                                            {t.languageName || t.languageCode.toUpperCase()}
                                         </option>
                                     ))}
                                 </select>
@@ -487,6 +508,7 @@ const App = () => {
                             </div>
                         </div>
                     )}
+                    {youtubeError && <p id="youtube-error" role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{youtubeError}</p>}
                 </div>
 
                 <div className="p-4 bg-slate-50 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex gap-3 justify-end">
@@ -516,10 +538,11 @@ const App = () => {
                     ) : (
                         <button 
                             onClick={handleConfirmYoutubeImport}
+                            disabled={isFetchingYoutube}
                             className="px-6 py-2 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 shadow-sm transition-colors flex items-center gap-2"
                         >
                             <CheckCircleIcon className="w-4 h-4" />
-                            Import Transcript
+                            {isFetchingYoutube ? 'Importing...' : 'Import Transcript'}
                         </button>
                     )}
                 </div>
@@ -804,6 +827,7 @@ const App = () => {
                     onDelete={handleDeleteLecture}
                     onContinueRecording={() => setViewMode('record')}
                     isProcessing={isProcessingId === lecture.id}
+                    processingStatus={processingStatus}
                 />
             </div>
         );

@@ -163,11 +163,13 @@ export default function Battle({ code }: { code: string }) {
               </div>
               <p className="q-muted">
                 {room.total} questions · {room.round_seconds}s per round ·{" "}
-                {room.joined
-                  ? connected
-                    ? "Live connection"
-                    : "Reconnecting…"
-                  : "Join to see the players"}
+                {room.state === "finished"
+                  ? "Battle complete"
+                  : room.joined
+                    ? connected
+                      ? "Live connection"
+                      : "Reconnecting…"
+                    : "Join to see the players"}
               </p>
               {room.state === "lobby" && (
                 <CopyLink value={location.origin + "/battle/" + code} />
@@ -338,9 +340,11 @@ export default function Battle({ code }: { code: string }) {
                               ? p.ready
                                 ? "Ready"
                                 : "Getting ready"
-                              : p.connected
-                                ? "Connected"
-                                : "Reconnecting"}
+                              : room.state === "finished"
+                                ? "Finished"
+                                : p.connected
+                                  ? "Connected"
+                                  : "Reconnecting"}
                           </small>
                         </span>
                         <b>

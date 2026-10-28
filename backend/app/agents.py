@@ -4,7 +4,7 @@ import json
 import html
 import re
 import time
-from typing import TypedDict, Any, Literal
+from typing import TypedDict, Any
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
 from .providers import gateway, AIError
@@ -19,6 +19,7 @@ from .generation import (
 )
 from .schemas import QuizDraft, GenerateRequest, AIRequest
 from .models import Session, AgentRun, StudyPlan
+from .study_content import CONTENT_MODELS, normalize_content
 
 
 class State(TypedDict, total=False):
@@ -36,19 +37,6 @@ class State(TypedDict, total=False):
     revision_count: int
     review_issues: list[str]
     review_question_ids: list[str]
-
-
-class Summary(BaseModel):
-    overview: str
-    mainPoints: list[str]
-    keyTerms: list[dict[str, str]]
-
-
-class Flashcard(BaseModel):
-    front: str
-    back: str
-    difficulty: Literal["Easy", "Medium", "Hard"]
-    topic: str
 
 
 class Review(BaseModel):
@@ -198,6 +186,11 @@ class Workflows:
                 "\nREVISION REQUIRED: Correct the previous draft using this independent review. Omit unsupported details, preserve the required schema, and use only the supplied source. Review feedback: "
                 + feedback
             )
+            if s["task"] != "quiz" and s.get("result") is not None:
+                prompt += (
+                    "\nPREVIOUS CANDIDATE TO CORRECT: "
+                    + json.dumps(s["result"], ensure_ascii=False)[:6000]
+                )
         kwargs = {"task": task or s["task"]}
         if response_schema is not None:
             kwargs["response_schema"] = response_schema
@@ -338,6 +331,7 @@ class Workflows:
                         if feedback
                         else ""
                     ),
+                    response_schema=CONTENT_MODELS["notes"].model_json_schema(),
                 )
                 tokens += usage["tokens"]
                 text = value.get("text") if isinstance(value, dict) else None
@@ -352,38 +346,51 @@ class Workflows:
                 502,
             )
         shapes = {
-            "summary": "{overview:string,mainPoints:string[],keyTerms:[{term:string,definition:string}]}",
-            "flashcards": "{items:[{front:string,back:string,difficulty:Easy|Medium|Hard,topic:string}]}",
-            "notes": "{text:string} with detailed structured Markdown notes",
-            "mindmap": "{text:string} with valid Mermaid graph TD syntax; quoted labels; no HTML, links, directives or code fences",
-            "topics": "{items:[{timestamp:number,topic:string}]} preserving actual source timestamps",
+            "summary": '{"overview":"...","mainPoints":["..."],"keyTerms":[{"term":"...","definition":"..."}]}',
+            "flashcards": '{"items":[{"front":"...","back":"...","difficulty":"Easy","topic":"..."}]}',
+            "mindmap": '{"nodes":[{"id":"n0","label":"Central concept"},{"id":"n1","label":"Related concept"}],"edges":[{"source":"n0","target":"n1"}]}',
+            "topics": '{"items":[{"timestamp":0,"topic":"..."}]}',
         }
-        value, usage = await self.ask(
-            s,
-            f"Produce {s['task']}. Be concise: a summary needs at most six main points and eight key terms; flashcards need eight items. Return JSON {shapes[s['task']]}. Use source only. {s.get('context', '')}\nSOURCE DATA:\n{s['evidence']}",
+        instructions = (
+            "Build a connected concept map with 8–16 short, source-grounded concept labels. Return nodes and edges, never Mermaid code. Node IDs use n0, n1, etc.; edges must refer to existing node IDs."
+            if s["task"] == "mindmap"
+            else "Preserve actual source timestamps."
+            if s["task"] == "topics"
+            else "A summary needs at most six main points and eight key terms; flashcards need eight items."
         )
-        try:
-            if s["task"] == "summary":
-                value = Summary.model_validate(value).model_dump()
-            elif s["task"] == "flashcards":
-                value = [
-                    Flashcard.model_validate(v).model_dump() for v in value["items"]
-                ]
-            elif s["task"] == "topics":
-                value = value["items"]
-                if not all(
-                    isinstance(v.get("timestamp"), (int, float))
-                    and isinstance(v.get("topic"), str)
-                    for v in value
-                ):
-                    raise ValueError()
-            else:
-                value = value["text"]
-                if not isinstance(value, str) or not value.strip():
-                    raise ValueError()
-        except (ValueError, KeyError, TypeError):
-            raise AIError("Generated study content failed validation", 502)
-        return {"result": value, "_usage": usage}
+        prompt = f"Produce {s['task']}. {instructions} Return ONLY JSON in this exact structure: {shapes[s['task']]}. Use source only. {s.get('context', '')}\nSOURCE DATA:\n{s['evidence']}"
+        feedback = ""
+        tokens = 0
+        for attempt in range(2):
+            try:
+                value, usage = await self.ask(
+                    s,
+                    prompt
+                    + (
+                        "\nFORMAT CORRECTION: "
+                        + feedback
+                        + ". Return a complete corrected object with the exact required fields."
+                        if feedback
+                        else ""
+                    ),
+                    response_schema=CONTENT_MODELS[s["task"]].model_json_schema(),
+                )
+                tokens += usage["tokens"]
+                result = normalize_content(s["task"], value)
+                usage.update({"tokens": tokens, "generation_attempts": attempt + 1})
+                return {"result": result, "_usage": usage}
+            except (ValueError, KeyError, TypeError) as error:
+                feedback = validation_feedback(error)[:1200]
+            except AIError as error:
+                if not str(error).startswith("AI generated malformed JSON"):
+                    raise
+                feedback = "Return valid JSON without code fences"
+        error = AIError(
+            "Generated study content could not be corrected after two attempts. Please retry this study tool.",
+            502,
+        )
+        error.validation_issues = feedback
+        raise error
 
     async def tutor(self, s):
         value, usage = await self.ask(
@@ -411,6 +418,8 @@ class Workflows:
             if s["task"] == "planner"
             else "Check factual faithfulness to the supplied excerpts. Reject specific unsupported or contradictory claims and invented citations. A concise summary need not cover every excerpt. Repeating a term in an overview and glossary, paraphrasing, decoding HTML entities, and omitting detail are not errors. Do not apply quiz-answer or duplicate-question rules to study notes."
         )
+        if s["task"] == "mindmap":
+            rules += " This candidate is a concept map: unlabeled arrows organize related source concepts and do not assert causality, numerical equality, or a chronological step unless the labels explicitly say so. Check the factual node labels; allow concise paraphrases and organizational grouping."
         candidate = (
             quiz_candidate(s["result"], s["source_passages"])
             if s["task"] == "quiz"

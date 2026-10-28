@@ -11,9 +11,12 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUploadComplete, onCancel 
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [progressStr, setProgressStr] = useState<string>('');
+    const [uploadError, setUploadError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (isProcessing) return;
+        setUploadError(null);
         if (e.target.files) {
             const newFiles = Array.from(e.target.files);
             setSelectedFiles((prev) => [...prev, ...newFiles]);
@@ -34,7 +37,8 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUploadComplete, onCancel 
     };
 
     const handleProcessFiles = async () => {
-        if (selectedFiles.length === 0) return;
+        if (selectedFiles.length === 0 || isProcessing) return;
+        setUploadError(null);
         setIsProcessing(true);
         let combinedText = '';
         const titles = [];
@@ -49,8 +53,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUploadComplete, onCancel 
             }
             onUploadComplete(combinedText, titles);
         } catch (error: any) {
-            console.error("Error processing files", error);
-            alert(`Failed to process files: ${error.message}`);
+            setUploadError(`Failed to process files: ${error.message}`);
         } finally {
             setIsProcessing(false);
             setProgressStr('');
@@ -64,7 +67,7 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUploadComplete, onCancel 
                     <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">Combine Learning Resources</h2>
                     <p className="text-sm text-slate-500 dark:text-slate-400">Upload PDFs, DOCX, Images, or Text files to combine them into one unified study set.</p>
                 </div>
-                <button onClick={onCancel} className="p-2 text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:text-slate-300 rounded-full hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
+                <button onClick={onCancel} disabled={isProcessing} aria-label="Close upload" className="p-2 text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:text-slate-300 rounded-full hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
                     <XMarkIcon className="w-6 h-6" />
                 </button>
             </div>
@@ -75,10 +78,11 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUploadComplete, onCancel 
                     role="button"
                     tabIndex={0}
                     aria-label="Choose or drop study files"
+                    aria-disabled={isProcessing}
                     onKeyDown={e => {if(e.key === 'Enter' || e.key === ' ') {e.preventDefault();fileInputRef.current?.click();}}}
                     onDragOver={e => e.preventDefault()}
                     onDrop={e => {e.preventDefault();if(!isProcessing)setSelectedFiles(prev => [...prev,...Array.from(e.dataTransfer.files)]);}}
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={() => {if(!isProcessing) fileInputRef.current?.click();}}
                 >
                     <ArrowUpTrayIcon className="w-12 h-12 text-indigo-400 mx-auto mb-4" />
                     <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-1">Click or drag files here</h3>
@@ -86,12 +90,15 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUploadComplete, onCancel 
                     <input 
                         type="file" 
                         multiple 
+                        disabled={isProcessing}
                         ref={fileInputRef} 
                         onChange={handleFileSelect} 
                         className="hidden"
                         accept=".pdf,.docx,.doc,.pptx,.txt,.md,image/*"
                     />
                 </div>
+
+                {uploadError && <p role="alert" className="mt-4 text-sm text-red-600 dark:text-red-400">{uploadError}</p>}
 
                 {selectedFiles.length > 0 && (
                     <div className="mt-8">

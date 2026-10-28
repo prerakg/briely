@@ -25,9 +25,10 @@ interface TranscriptViewProps {
     onDelete: (id: string) => void;
     onContinueRecording: () => void;
     isProcessing?: boolean;
+    processingStatus?: string;
 }
 
-const TranscriptView: React.FC<TranscriptViewProps> = ({ lecture, onBack, onUpdate, onDelete, onContinueRecording, isProcessing }) => {
+const TranscriptView: React.FC<TranscriptViewProps> = ({ lecture, onBack, onUpdate, onDelete, onContinueRecording, isProcessing, processingStatus }) => {
     const isCombinedResource = lecture.tags?.includes('Combined Resources');
     const [activeTab, setActiveTab] = useState<DetailTab>(isCombinedResource ? 'summary' : 'transcript');
     const [isLoading, setIsLoading] = useState(false);
@@ -869,6 +870,7 @@ const TranscriptView: React.FC<TranscriptViewProps> = ({ lecture, onBack, onUpda
                             <div className="flex items-center gap-2">
                                 <input
                                     type="text"
+                                    aria-label="Lecture title"
                                     value={tempTitle}
                                     onChange={(e) => setTempTitle(e.target.value)}
                                     onBlur={handleTitleSave}
@@ -902,7 +904,7 @@ const TranscriptView: React.FC<TranscriptViewProps> = ({ lecture, onBack, onUpda
                                     <span key={tag} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-medium border border-slate-200 dark:border-slate-700 group">
                                         <HashtagIcon className="w-3 h-3 text-slate-400 dark:text-slate-500" />
                                         {tag}
-                                        <button onClick={() => handleRemoveTag(tag)} className="text-slate-400 dark:text-slate-500 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <button onClick={() => handleRemoveTag(tag)} aria-label={`Remove tag ${tag}`} className="text-slate-400 dark:text-slate-500 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
                                             <XMarkIcon className="w-3 h-3" />
                                         </button>
                                     </span>
@@ -937,7 +939,7 @@ const TranscriptView: React.FC<TranscriptViewProps> = ({ lecture, onBack, onUpda
                     {isProcessing && (
                         <div className="flex items-center gap-2 px-3 py-1 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full text-xs font-semibold animate-pulse border border-indigo-100 whitespace-nowrap">
                             <SparklesIcon className="w-3 h-3" />
-                            Processing AI...
+                            {processingStatus || 'Processing AI…'}
                         </div>
                     )}
                     <button
@@ -953,13 +955,9 @@ const TranscriptView: React.FC<TranscriptViewProps> = ({ lecture, onBack, onUpda
 
             {/* Navigation Tabs */}
             <div className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700 px-4 flex gap-1 overflow-x-auto">
-                {!isCombinedResource && (
                     <TabButton active={activeTab === 'transcript'} onClick={() => setActiveTab('transcript')} icon={<DocumentTextIcon className="w-4 h-4" />}>Transcript</TabButton>
-                )}
                 <TabButton active={activeTab === 'summary'} onClick={() => setActiveTab('summary')} icon={<SparklesIcon className="w-4 h-4" />}>Summary</TabButton>
-                {!isCombinedResource && (
                     <TabButton active={activeTab === 'mindmap'} onClick={() => setActiveTab('mindmap')} icon={<MapIcon className="w-4 h-4" />}>Mind Map</TabButton>
-                )}
                 <TabButton active={activeTab === 'flashcards'} onClick={() => setActiveTab('flashcards')} icon={<BoltIcon className="w-4 h-4" />}>Flashcards</TabButton>
                 <TabButton active={activeTab === 'quiz'} onClick={() => setActiveTab('quiz')} icon={<AcademicCapIcon className="w-4 h-4" />}>Quiz</TabButton>
                 <TabButton active={activeTab === 'notes'} onClick={() => setActiveTab('notes')} icon={<BookOpenIcon className="w-4 h-4" />}>Notes</TabButton>
@@ -1096,6 +1094,11 @@ const FlashcardItem: React.FC<{ card: Flashcard }> = ({ card }) => {
     return (
         <div
             onClick={() => setFlipped(!flipped)}
+            role="button"
+            tabIndex={0}
+            aria-label={`Flashcard: ${card.front}`}
+            aria-pressed={flipped}
+            onKeyDown={event => {if (event.key === 'Enter' || event.key === ' ') {event.preventDefault();setFlipped(value => !value);}}}
             className="h-72 w-full cursor-pointer perspective-1000 group"
         >
             <div className={`relative w-full h-full transition-all duration-500 transform-style-3d ${flipped ? 'rotate-y-180' : ''}`}>

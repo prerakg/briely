@@ -60,12 +60,9 @@ export const parsePptx = async (file: File): Promise<string> => {
             const slideFile = loadedZip.files[slideName];
             const xmlContent = await slideFile.async('string');
             
-            const regex = /<a:t[^>]*>([^<]*)<\/a:t>/g;
-            let match;
-            let slideText = '';
-            while ((match = regex.exec(xmlContent)) !== null) {
-                slideText += match[1] + ' ';
-            }
+            const document = new DOMParser().parseFromString(xmlContent, 'application/xml');
+            if (document.querySelector('parsererror')) throw new Error('Invalid slide XML');
+            const slideText = Array.from(document.getElementsByTagNameNS('http://schemas.openxmlformats.org/drawingml/2006/main', 't')).map(node => node.textContent || '').join(' ');
             if (slideText.trim()) {
                 fullText += `[Slide ${slideName.replace(/[^0-9]/g, '')}]\n${slideText.trim()}\n\n`;
             }
@@ -101,6 +98,7 @@ export const parseFile = async (file: File): Promise<string> => {
         fileName.endsWith('.docx') ||
         fileName.endsWith('.doc')
     ) {
+        if (fileName.endsWith('.doc')) throw new Error('Older .doc format is not supported. Please convert to .docx.');
         text = await parseDocx(file);
     } else if (
         fileType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
@@ -120,5 +118,6 @@ export const parseFile = async (file: File): Promise<string> => {
         throw new Error(`Unsupported file type: ${fileType || fileName}`);
     }
 
+    if (!text.trim()) throw new Error(`No readable text found in ${file.name}. For scanned documents, upload readable page images for text extraction.`);
     return `\n--- SOURCE: ${file.name} ---\n${text}\n`;
 };
